@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import 'dotenv/config';
 /**
  * LightFeed Video Curation Agent
  *
