@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+    height: 100%;
+  }
+
+  body {
+    @apply bg-warm-50 text-stone-900 font-sans;
+    overscroll-behavior: none;
+    height: 100%;
+  }
+
+  #root {
+    height: 100%;
+  }
+}
+
+@layer utilities {
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Scroll snap feed */
+.feed-scroll {
+  scroll-snap-type: y mandatory;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.feed-item {
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+}
+
+/* Slide-up modal animation */
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
