@@ -3,29 +3,46 @@ import 'dotenv/config';
 /**
  * LightFeed Video Curation Agent
  *
- * Searches YouTube for beneficial Islamic content and uses Claude to filter
- * results against LightFeed's content guidelines. Outputs video objects ready
- * to paste into src/data/videos.ts.
+ * Searches YouTube for beneficial content, fetches exact durations, filters
+ * with Claude, and posts approved videos directly to Supabase.
  *
  * Setup:
- *   1. Enable YouTube Data API v3 at https://console.cloud.google.com/
- *   2. Copy .env.example to .env and fill in both keys
- *   3. Run: npm run curate -- --category quran --count 10
+ *   1. Run supabase/schema.sql in your Supabase SQL editor
+ *   2. Fill in .env (copy from .env.example)
+ *   3. npm run curate -- --category quran --lang ar
+ *      npm run curate -- --scholar "طارق السويدان" --category spiritual
+ *      npm run curate -- --category hadith --lang en --count 15 --dry-run
  *
- * Available categories: quran | hadith | spiritual | discipline | family | income | growth
+ * Flags:
+ *   --category   quran | hadith | spiritual | discipline | family | income | growth | all
+ *   --scholar    Scholar name or Arabic name (e.g. "طارق السويدان")
+ *   --lang       en | ar | both  (default: both)
+ *   --count      Max videos to insert (default: 20)
+ *   --dry-run    Print results without inserting into Supabase
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { createClient } from '@supabase/supabase-js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+type Lang = 'en' | 'ar';
+
+interface SearchConfig {
+  query: string;
+  lang: Lang;
+  scholarName?: string;
+}
 
 interface YouTubeResult {
   videoId: string;
   title: string;
   description: string;
   channelTitle: string;
+  duration: string;  // parsed to "M:SS"
+  lang: Lang;
 }
 
 interface CuratedVideo {
@@ -34,72 +51,96 @@ interface CuratedVideo {
   source: string;
   category: string;
   description: string;
-  reason: string;
+  duration: string;
+  language: Lang;
 }
 
 // ---------------------------------------------------------------------------
-// Category search queries
+// Known scholars to always include in searches
 // ---------------------------------------------------------------------------
 
-const QUERIES: Record<string, string[]> = {
-  quran: [
-    'quran reflection reminder short',
-    'quran tafsir one minute reminder',
-    'beautiful quran verse meaning short',
-  ],
-  hadith: [
-    'hadith reminder short clip',
-    'sunnah reminder two minutes',
-    'prophet muhammad hadith short reminder',
-  ],
-  spiritual: [
-    'islamic spiritual reminder short',
-    'dhikr tawakkul reminder short clip',
-    'islamic heart reminder short',
-  ],
-  discipline: [
-    'islamic self discipline reminder short',
-    'controlling nafs islam short clip',
-    'islamic mindset reminder short',
-  ],
-  family: [
-    'islamic family reminder short clip',
-    'parents rights islam short',
-    'marriage kindness islam reminder',
-  ],
-  income: [
-    'halal income barakah reminder short',
-    'rizq honest earning islam reminder',
-    'islamic work ethics reminder short',
-  ],
-  growth: [
-    'islamic personal growth reminder short',
-    'muslim self improvement reminder',
-    'islamic wisdom daily reminder short',
-  ],
+const KNOWN_SCHOLARS: Array<{ name: string; query: string; lang: Lang }> = [
+  { name: 'Tariq Al-Suwaidan', query: 'طارق السويدان',              lang: 'ar' },
+  { name: 'Nouman Ali Khan',   query: 'nouman ali khan',             lang: 'en' },
+  { name: 'Mufti Menk',       query: 'mufti menk',                  lang: 'en' },
+  { name: 'Omar Suleiman',    query: 'omar suleiman',               lang: 'en' },
+  { name: 'Hamza Yusuf',      query: 'hamza yusuf',                 lang: 'en' },
+  { name: 'Yasir Qadhi',      query: 'yasir qadhi',                 lang: 'en' },
+  { name: 'Bilal Assad',      query: 'bilal assad reminder',        lang: 'en' },
+  { name: 'محمد الغليظ',     query: 'محمد الغليظ خواطر',           lang: 'ar' },
+];
+
+// ---------------------------------------------------------------------------
+// Category generic queries (language-aware)
+// ---------------------------------------------------------------------------
+
+const CATEGORY_QUERIES: Record<string, { en: string[]; ar: string[] }> = {
+  quran: {
+    en: ['quran reflection short reminder', 'quran verse meaning short clip'],
+    ar: ['طارق السويدان قرآن تأمل', 'تأمل قرآني قصير مؤثر', 'خواطر قرآنية قصيرة'],
+  },
+  hadith: {
+    en: ['hadith reminder short clip', 'sunnah reminder two minutes'],
+    ar: ['حديث نبوي قصير مؤثر', 'تذكير بحديث نبوي', 'سنة نبوية تذكير'],
+  },
+  spiritual: {
+    en: ['islamic spiritual reminder short', 'dhikr tawakkul reminder'],
+    ar: ['تذكير روحي إسلامي قصير', 'ذكر وتوكل على الله قصير', 'خاطرة روحية قصيرة'],
+  },
+  discipline: {
+    en: ['islamic self discipline reminder short', 'controlling nafs islam short'],
+    ar: ['تزكية النفس قصير', 'ضبط النفس إسلامي تذكير', 'مجاهدة النفس قصير'],
+  },
+  family: {
+    en: ['islamic family reminder short', 'parents rights islam short'],
+    ar: ['بر الوالدين تذكير قصير', 'الأسرة المسلمة خاطرة قصيرة', 'حقوق الأهل في الإسلام'],
+  },
+  income: {
+    en: ['halal income barakah reminder short', 'rizq honest earning islam'],
+    ar: ['الرزق الحلال تذكير قصير', 'بركة الرزق إسلام خاطرة', 'الكسب الحلال تذكير'],
+  },
+  growth: {
+    en: ['islamic personal growth reminder short', 'muslim self improvement short'],
+    ar: ['تطوير الذات إسلامي قصير', 'النمو الشخصي من منظور إسلامي', 'خاطرة تحفيزية إسلامية'],
+  },
 };
 
 // ---------------------------------------------------------------------------
-// YouTube search
+// Parse ISO 8601 duration → "M:SS" or "H:MM:SS"
 // ---------------------------------------------------------------------------
 
-async function searchYouTube(query: string, apiKey: string, maxResults = 8): Promise<YouTubeResult[]> {
+function parseDuration(iso: string): string {
+  const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+  if (!m) return '0:00';
+  const h = parseInt(m[1] ?? '0', 10);
+  const min = parseInt(m[2] ?? '0', 10);
+  const s = parseInt(m[3] ?? '0', 10);
+  if (h > 0) return `${h}:${String(min).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${min}:${String(s).padStart(2, '0')}`;
+}
+
+// ---------------------------------------------------------------------------
+// YouTube: search
+// ---------------------------------------------------------------------------
+
+async function searchYouTube(
+  config: SearchConfig,
+  apiKey: string,
+  maxResults = 6,
+): Promise<{ videoId: string; title: string; description: string; channelTitle: string }[]> {
   const params = new URLSearchParams({
     part: 'snippet',
-    q: query,
+    q: config.query,
     type: 'video',
-    videoDuration: 'short',   // under 4 minutes
+    videoDuration: 'short',       // < 4 minutes
     maxResults: String(maxResults),
-    relevanceLanguage: 'en',
+    relevanceLanguage: config.lang,
     safeSearch: 'strict',
     key: apiKey,
   });
 
   const res = await fetch(`https://www.googleapis.com/youtube/v3/search?${params}`);
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`YouTube API ${res.status}: ${body}`);
-  }
+  if (!res.ok) throw new Error(`YouTube search failed: ${res.status} ${await res.text()}`);
 
   const data = await res.json() as {
     items?: Array<{
@@ -117,64 +158,123 @@ async function searchYouTube(query: string, apiKey: string, maxResults = 8): Pro
 }
 
 // ---------------------------------------------------------------------------
-// Claude filter
+// YouTube: fetch durations for a batch of video IDs
+// ---------------------------------------------------------------------------
+
+async function fetchDurations(videoIds: string[], apiKey: string): Promise<Record<string, string>> {
+  if (videoIds.length === 0) return {};
+  const params = new URLSearchParams({
+    part: 'contentDetails',
+    id: videoIds.join(','),
+    key: apiKey,
+  });
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?${params}`);
+  if (!res.ok) return {};
+  const data = await res.json() as {
+    items?: Array<{ id: string; contentDetails: { duration: string } }>;
+  };
+  const out: Record<string, string> = {};
+  for (const item of data.items ?? []) {
+    out[item.id] = parseDuration(item.contentDetails.duration);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Claude: filter and describe
 // ---------------------------------------------------------------------------
 
 async function filterWithClaude(
   results: YouTubeResult[],
   category: string,
   client: Anthropic,
+  availableCategories: string[],
 ): Promise<CuratedVideo[]> {
-  const message = await client.messages.create({
+  const msg = await client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 2048,
     messages: [{
       role: 'user',
-      content: `You are the content curator for LightFeed — a beneficial short-form video app for Muslims.
+      content: `You are the content curator for LightFeed — a beneficial Islamic short-form video app.
 
-Category being curated: **${category}**
+${category === 'all'
+  ? `Assign each approved video to the most fitting category from: ${availableCategories.join(', ')}`
+  : `Category for all approved videos: **${category}**`}
 
-Content must meet ALL of these criteria:
-- Genuinely beneficial, Islamic, and uplifting
-- Calm and respectful tone — no aggression or lecturing
-- No political, sectarian, or controversial content
-- No guilt-based or fear-mongering language
-- Prefer well-known trusted scholars or reputable Islamic channels
-- Appropriate for all ages
+Content rules — REJECT if any apply:
+- Not in English or Arabic (reject other languages)
+- Political, sectarian, or controversial content
+- Guilt-based or fear-mongering tone
+- Not genuinely Islamic or beneficial
+- Primarily entertainment without religious benefit
+- Unknown or unvetted channel (unless content is clearly beneficial)
 
-Here are YouTube search results to evaluate:
-${JSON.stringify(results, null, 2)}
+APPROVE if:
+- Content is from a well-known, trusted Islamic scholar or reputable channel
+- Tone is calm, uplifting, and encouraging
+- Clearly beneficial and appropriate for all Muslims
+- Language is English or Arabic only
 
-Return a JSON array of APPROVED videos only. Write each description in a calm, encouraging tone (1–2 sentences). If nothing qualifies, return [].
+Videos to evaluate:
+${JSON.stringify(results.map(r => ({
+  videoId: r.videoId,
+  title: r.title,
+  description: r.description.slice(0, 200),
+  channel: r.channelTitle,
+  duration: r.duration,
+  lang: r.lang,
+})), null, 2)}
 
-Format:
+Return a JSON array of APPROVED videos only. Write each description in a calm, encouraging tone (1–2 sentences, in English regardless of the video language). If nothing qualifies, return [].
+
 [
   {
     "youtubeId": "...",
     "title": "clean readable title",
-    "source": "channel or scholar name",
-    "category": "${category}",
-    "description": "What the viewer will benefit from. Calm tone.",
-    "reason": "Why approved"
+    "source": "scholar or channel name",
+    "category": "${category === 'all' ? 'one of: ' + availableCategories.join(', ') : category}",
+    "description": "What the viewer will benefit from. Calm, encouraging English sentence.",
+    "duration": "M:SS",
+    "language": "en" or "ar"
   }
 ]`,
     }],
   });
 
-  const text = message.content[0].type === 'text' ? message.content[0].text : '';
+  const text = msg.content[0].type === 'text' ? msg.content[0].text : '';
   const match = text.match(/\[[\s\S]*\]/);
   if (!match) return [];
-
-  try {
-    return JSON.parse(match[0]) as CuratedVideo[];
-  } catch {
-    console.error('Could not parse Claude response as JSON');
-    return [];
-  }
+  try { return JSON.parse(match[0]) as CuratedVideo[]; }
+  catch { console.error('Could not parse Claude response'); return []; }
 }
 
 // ---------------------------------------------------------------------------
-// CLI entry point
+// Supabase: insert approved videos
+// ---------------------------------------------------------------------------
+
+async function insertToSupabase(videos: CuratedVideo[], supabaseUrl: string, serviceRoleKey: string) {
+  const db = createClient(supabaseUrl, serviceRoleKey);
+  const rows = videos.map(v => ({
+    youtube_id:  v.youtubeId,
+    title:       v.title,
+    source:      v.source,
+    category:    v.category,
+    description: v.description,
+    duration:    v.duration,
+    language:    v.language,
+  }));
+
+  const { data, error } = await db
+    .from('videos')
+    .upsert(rows, { onConflict: 'youtube_id', ignoreDuplicates: true })
+    .select('youtube_id');
+
+  if (error) throw error;
+  return (data ?? []).length;
+}
+
+// ---------------------------------------------------------------------------
+// Main
 // ---------------------------------------------------------------------------
 
 async function main() {
@@ -185,60 +285,116 @@ async function main() {
   };
 
   const category   = get('--category', 'quran');
-  const count      = parseInt(get('--count', '10'), 10);
-  const youtubeKey = process.env.YOUTUBE_API_KEY;
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const scholarArg = get('--scholar', '');
+  const langArg    = get('--lang', 'both') as Lang | 'both';
+  const count      = parseInt(get('--count', '20'), 10);
+  const dryRun     = args.includes('--dry-run');
 
-  if (!youtubeKey)    { console.error('❌  Set YOUTUBE_API_KEY in .env');    process.exit(1); }
-  if (!anthropicKey)  { console.error('❌  Set ANTHROPIC_API_KEY in .env');  process.exit(1); }
+  const youtubeKey     = process.env.YOUTUBE_API_KEY;
+  const anthropicKey   = process.env.ANTHROPIC_API_KEY;
+  const supabaseUrl    = process.env.SUPABASE_URL;
+  const supabaseKey    = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  const queries = QUERIES[category];
-  if (!queries) {
-    console.error(`❌  Unknown category "${category}". Options: ${Object.keys(QUERIES).join(', ')}`);
+  if (!youtubeKey)   { console.error('❌  YOUTUBE_API_KEY missing');           process.exit(1); }
+  if (!anthropicKey) { console.error('❌  ANTHROPIC_API_KEY missing');         process.exit(1); }
+  if (!dryRun && (!supabaseUrl || !supabaseKey)) {
+    console.error('❌  SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing (use --dry-run to skip DB)');
     process.exit(1);
+  }
+
+  // Build search configs
+  const searches: SearchConfig[] = [];
+  const langs: Lang[] = langArg === 'both' ? ['en', 'ar'] : [langArg];
+
+  const categoriesToRun =
+    category === 'all' ? Object.keys(CATEGORY_QUERIES) : [category];
+
+  if (scholarArg) {
+    // Scholar-specific: search by name across requested languages
+    for (const lang of langs) {
+      searches.push({ query: `${scholarArg} short reminder`, lang, scholarName: scholarArg });
+    }
+  } else {
+    // Category queries + well-known scholars
+    for (const cat of categoriesToRun) {
+      const catQueries = CATEGORY_QUERIES[cat];
+      for (const lang of langs) {
+        for (const q of catQueries[lang]) {
+          searches.push({ query: q, lang });
+        }
+      }
+    }
+    // Add relevant scholars for requested languages (once, not per category)
+    for (const scholar of KNOWN_SCHOLARS) {
+      if (langs.includes(scholar.lang)) {
+        searches.push({
+          query: `${scholar.query} تذكير قصير OR short reminder`,
+          lang: scholar.lang,
+          scholarName: scholar.name,
+        });
+      }
+    }
   }
 
   const client = new Anthropic({ apiKey: anthropicKey });
 
-  console.log(`\n🔍  Searching YouTube — category: ${category}\n`);
+  console.log(`\n✦ LightFeed Curator`);
+  console.log(`  Category : ${category}`);
+  console.log(`  Language : ${langArg}`);
+  console.log(`  Scholar  : ${scholarArg || '(all known scholars)'}`);
+  console.log(`  Dry run  : ${dryRun}\n`);
 
-  const all: YouTubeResult[] = [];
-  for (const query of queries) {
-    process.stdout.write(`  "${query}" ... `);
-    const results = await searchYouTube(query, youtubeKey, 6);
+  // Search YouTube
+  const raw: Array<{ videoId: string; title: string; description: string; channelTitle: string; lang: Lang }> = [];
+  for (const cfg of searches) {
+    process.stdout.write(`  🔍 "${cfg.query}" [${cfg.lang}] … `);
+    const results = await searchYouTube(cfg, youtubeKey, 5);
     console.log(`${results.length} results`);
-    all.push(...results);
+    raw.push(...results.map(r => ({ ...r, lang: cfg.lang })));
   }
 
   // Deduplicate by videoId
-  const unique = Array.from(new Map(all.map(r => [r.videoId, r])).values());
-  console.log(`\n✦  ${unique.length} unique candidates → asking Claude to review...\n`);
+  const unique = Array.from(new Map(raw.map(r => [r.videoId, r])).values());
+  console.log(`\n  ${unique.length} unique candidates`);
 
-  const approved = await filterWithClaude(unique, category, client);
+  // Fetch durations in one batch call
+  process.stdout.write('  ⏱  Fetching durations … ');
+  const durations = await fetchDurations(unique.map(r => r.videoId), youtubeKey);
+  console.log('done');
+
+  const withDuration: YouTubeResult[] = unique.map(r => ({
+    ...r,
+    duration: durations[r.videoId] ?? '?:??',
+  }));
+
+  // Claude filter
+  process.stdout.write('  🤖 Claude reviewing … ');
+  const approved = await filterWithClaude(withDuration, category, client, Object.keys(CATEGORY_QUERIES));
+  console.log(`${approved.length} approved\n`);
 
   if (approved.length === 0) {
-    console.log('⚠️  No videos approved. Try a different category or refine your queries.');
+    console.log('⚠️  Nothing approved. Try different queries or a broader --lang.');
     return;
   }
 
-  console.log(`✅  ${approved.length} approved\n`);
-  console.log('Add these to src/data/videos.ts:\n');
-  console.log('// ── Curated by AI agent ──────────────────────────────');
-  approved.slice(0, count).forEach((v, i) => {
-    const escape = (s: string) => s.replace(/'/g, "\\'");
-    console.log(`  {
-    id: 'v_${category}_${i + 1}',
-    youtubeId: '${v.youtubeId}',
-    title: '${escape(v.title)}',
-    source: '${escape(v.source)}',
-    category: '${v.category}',
-    description: '${escape(v.description)}',
-    duration: 'X:XX', // fill in manually
-  },`);
+  const toInsert = approved.slice(0, count);
+
+  // Print results
+  console.log('Approved videos:');
+  toInsert.forEach((v, i) => {
+    console.log(`  ${i + 1}. [${v.language.toUpperCase()}] ${v.title} — ${v.source} (${v.duration})`);
   });
+
+  if (dryRun) {
+    console.log('\n[dry-run] Not inserted. Remove --dry-run to post to Supabase.');
+    return;
+  }
+
+  // Insert to Supabase
+  process.stdout.write('\n  📦 Inserting to Supabase … ');
+  const inserted = await insertToSupabase(toInsert, supabaseUrl!, supabaseKey!);
+  console.log(`${inserted} new rows added (duplicates skipped)\n`);
+  console.log('✅  Done. Refresh your LightFeed app to see the new videos.');
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch(err => { console.error(err); process.exit(1); });

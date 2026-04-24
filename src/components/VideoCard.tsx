@@ -15,7 +15,7 @@ export function VideoCard({ video, onPlay }: VideoCardProps) {
   const [playing, setPlaying]           = useState(false);
   const [played, setPlayed]             = useState(false);
   const [showReflection, setShowReflection] = useState(false);
-  const saved    = isSaved(video.id);
+  const saved    = isSaved(video.youtubeId);
   const category = getCategoryById(video.category);
 
   const handlePlay = () => {
@@ -98,7 +98,7 @@ export function VideoCard({ video, onPlay }: VideoCardProps) {
             </button>
 
             <button
-              onClick={() => toggleSaved(video.id)}
+              onClick={() => toggleSaved(video.youtubeId)}
               className={`flex items-center gap-2 text-sm font-medium transition-colors
                 ${saved ? 'text-forest-900' : 'text-stone-400 hover:text-forest-900'}`}
             >
