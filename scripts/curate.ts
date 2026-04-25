@@ -33,7 +33,9 @@ type Lang = 'en' | 'ar';
 interface SearchConfig {
   query: string;
   lang: Lang;
+  category: string;
   scholarName?: string;
+  duration?: 'short' | 'medium' | 'any';
 }
 
 interface YouTubeResult {
@@ -43,6 +45,7 @@ interface YouTubeResult {
   channelTitle: string;
   duration: string;  // parsed to "M:SS"
   lang: Lang;
+  category: string;
 }
 
 interface CuratedVideo {
@@ -77,7 +80,7 @@ const KNOWN_SCHOLARS: Array<{ name: string; query: string; lang: Lang }> = [
 const CATEGORY_QUERIES: Record<string, { en: string[]; ar: string[] }> = {
   quran: {
     en: ['quran reflection short reminder', 'quran verse meaning short clip'],
-    ar: ['طارق السويدان قرآن تأمل', 'تأمل قرآني قصير مؤثر', 'خواطر قرآنية قصيرة'],
+    ar: ['تأمل قرآني قصير مؤثر', 'خواطر قرآنية قصيرة', 'طارق السويدان قرآن'],
   },
   hadith: {
     en: ['hadith reminder short clip', 'sunnah reminder two minutes'],
@@ -103,7 +106,32 @@ const CATEGORY_QUERIES: Record<string, { en: string[]; ar: string[] }> = {
     en: ['islamic personal growth reminder short', 'muslim self improvement short'],
     ar: ['تطوير الذات إسلامي قصير', 'النمو الشخصي من منظور إسلامي', 'خاطرة تحفيزية إسلامية'],
   },
+  prophets: {
+    en: ['prophet story islam short', 'stories of the prophets short', 'seerah story short clip', 'companions of prophet story'],
+    ar: ['قصص الأنبياء قصيرة', 'سيرة النبي قصيرة', 'قصة نبي مقطع قصير', 'طارق السويدان قصص الأنبياء'],
+  },
+  science: {
+    en: ['amazing nature documentary short', 'science fact short clip', 'space discovery short', 'wildlife short clip', 'ocean documentary short', 'universe facts short'],
+    ar: ['وثائقي طبيعة قصير', 'حقائق علمية مذهلة قصيرة', 'الكون والطبيعة مقطع قصير'],
+  },
+  news: {
+    en: ['good news today short', 'positive world news short', 'uplifting news story', 'world news summary short'],
+    ar: ['أخبار إيجابية قصيرة', 'أخبار العالم ملخص قصير', 'خبر مفرح اليوم'],
+  },
 };
+
+// ---------------------------------------------------------------------------
+// Clean raw YouTube description for direct use (no Claude)
+// ---------------------------------------------------------------------------
+
+function cleanDescription(raw: string): string {
+  return (raw
+    .replace(/https?:\/\/\S+/g, '')   // remove URLs
+    .replace(/#\w+/g, '')              // remove hashtags
+    .replace(/\n+/g, ' ')             // flatten newlines
+    .trim()
+    .slice(0, 180)) || 'A short beneficial video.';
+}
 
 // ---------------------------------------------------------------------------
 // Parse ISO 8601 duration → "M:SS" or "H:MM:SS"
@@ -132,12 +160,15 @@ async function searchYouTube(
     part: 'snippet',
     q: config.query,
     type: 'video',
-    videoDuration: 'short',       // < 4 minutes
     maxResults: String(maxResults),
     relevanceLanguage: config.lang,
     safeSearch: 'strict',
     key: apiKey,
   });
+  // 'short' < 4 min, 'medium' 4–20 min — skip filter entirely for 'any'
+  if (!config.duration || config.duration !== 'any') {
+    params.set('videoDuration', config.duration ?? 'short');
+  }
 
   const res = await fetch(`https://www.googleapis.com/youtube/v3/search?${params}`);
   if (!res.ok) throw new Error(`YouTube search failed: ${res.status} ${await res.text()}`);
@@ -189,31 +220,39 @@ async function filterWithClaude(
   category: string,
   client: Anthropic,
   availableCategories: string[],
+  scholarHint?: string,
 ): Promise<CuratedVideo[]> {
   const msg = await client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 2048,
     messages: [{
       role: 'user',
-      content: `You are the content curator for LightFeed — a beneficial Islamic short-form video app.
-
+      content: `You are the content curator for LightFeed — an app for beneficial, uplifting short-form content.
+${scholarHint ? `\nThe user specifically requested content from: **${scholarHint}**. Approve any video clearly from this scholar that is beneficial — do not reject for unfamiliar channel names.\n` : ''}
 ${category === 'all'
   ? `Assign each approved video to the most fitting category from: ${availableCategories.join(', ')}`
   : `Category for all approved videos: **${category}**`}
 
-Content rules — REJECT if any apply:
-- Not in English or Arabic (reject other languages)
-- Political, sectarian, or controversial content
-- Guilt-based or fear-mongering tone
-- Not genuinely Islamic or beneficial
-- Primarily entertainment without religious benefit
-- Unknown or unvetted channel (unless content is clearly beneficial)
+LightFeed's content philosophy:
+- Islamic reminders (Qur'an, hadith, spiritual, scholarly)
+- Stories of the prophets and Islamic history
+- Science, nature, and documentary content (any reputable source)
+- Uplifting or informative world news
+- Personal growth, discipline, family, and halal income content
+- Content does NOT have to be Islamic — it just has to be beneficial and appropriate
 
-APPROVE if:
-- Content is from a well-known, trusted Islamic scholar or reputable channel
-- Tone is calm, uplifting, and encouraging
-- Clearly beneficial and appropriate for all Muslims
-- Language is English or Arabic only
+APPROVE if the video is:
+- Beneficial, educational, uplifting, or informative
+- Appropriate for all ages and backgrounds
+- In English or Arabic only (reject other languages)
+- From a reputable or clearly credible source
+
+REJECT if the video is:
+- Primarily entertainment with no real benefit (pranks, gossip, clickbait)
+- Politically biased, sectarian, or divisive
+- Guilt-based, fear-mongering, or aggressive in tone
+- Inappropriate, violent, or adult in nature
+- In a language other than English or Arabic
 
 Videos to evaluate:
 ${JSON.stringify(results.map(r => ({
@@ -225,15 +264,15 @@ ${JSON.stringify(results.map(r => ({
   lang: r.lang,
 })), null, 2)}
 
-Return a JSON array of APPROVED videos only. Write each description in a calm, encouraging tone (1–2 sentences, in English regardless of the video language). If nothing qualifies, return [].
+Return a JSON array of APPROVED videos only. Write each description in a calm, encouraging tone (1–2 sentences in English, regardless of the video's language). If nothing qualifies, return [].
 
 [
   {
     "youtubeId": "...",
     "title": "clean readable title",
-    "source": "scholar or channel name",
+    "source": "scholar, channel, or outlet name",
     "category": "${category === 'all' ? 'one of: ' + availableCategories.join(', ') : category}",
-    "description": "What the viewer will benefit from. Calm, encouraging English sentence.",
+    "description": "What the viewer will benefit from. Calm, informative English sentence.",
     "duration": "M:SS",
     "language": "en" or "ar"
   }
@@ -289,14 +328,15 @@ async function main() {
   const langArg    = get('--lang', 'both') as Lang | 'both';
   const count      = parseInt(get('--count', '20'), 10);
   const dryRun     = args.includes('--dry-run');
+  const approveAll = args.includes('--approve-all');
 
   const youtubeKey     = process.env.YOUTUBE_API_KEY;
   const anthropicKey   = process.env.ANTHROPIC_API_KEY;
   const supabaseUrl    = process.env.SUPABASE_URL;
   const supabaseKey    = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!youtubeKey)   { console.error('❌  YOUTUBE_API_KEY missing');           process.exit(1); }
-  if (!anthropicKey) { console.error('❌  ANTHROPIC_API_KEY missing');         process.exit(1); }
+  if (!youtubeKey) { console.error('❌  YOUTUBE_API_KEY missing'); process.exit(1); }
+  if (!approveAll && !anthropicKey) { console.error('❌  ANTHROPIC_API_KEY missing (or use --approve-all to skip Claude)'); process.exit(1); }
   if (!dryRun && (!supabaseUrl || !supabaseKey)) {
     console.error('❌  SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing (use --dry-run to skip DB)');
     process.exit(1);
@@ -305,55 +345,64 @@ async function main() {
   // Build search configs
   const searches: SearchConfig[] = [];
   const langs: Lang[] = langArg === 'both' ? ['en', 'ar'] : [langArg];
-
-  const categoriesToRun =
-    category === 'all' ? Object.keys(CATEGORY_QUERIES) : [category];
+  const categoriesToRun = category === 'all' ? Object.keys(CATEGORY_QUERIES) : [category];
+  const fallbackCategory = category === 'all' ? 'spiritual' : category;
 
   if (scholarArg) {
-    // Scholar-specific: search by name across requested languages
-    for (const lang of langs) {
-      searches.push({ query: `${scholarArg} short reminder`, lang, scholarName: scholarArg });
+    const isArabicName = /[؀-ۿ]/.test(scholarArg);
+    const scholarLangs: Lang[] = langArg === 'both'
+      ? (isArabicName ? ['ar'] : ['en'])
+      : langs;
+
+    const arVariants = [scholarArg, `${scholarArg} تذكير`, `${scholarArg} خواطر`, `${scholarArg} حديث`, `${scholarArg} قرآن`];
+    const enVariants = [scholarArg, `${scholarArg} reminder`, `${scholarArg} short clip`, `${scholarArg} lecture`];
+
+    for (const lang of scholarLangs) {
+      for (const q of (lang === 'ar' ? arVariants : enVariants)) {
+        searches.push({ query: q, lang, category: fallbackCategory, scholarName: scholarArg, duration: 'short' });
+        searches.push({ query: q, lang, category: fallbackCategory, scholarName: scholarArg, duration: 'medium' });
+      }
     }
   } else {
-    // Category queries + well-known scholars
     for (const cat of categoriesToRun) {
       const catQueries = CATEGORY_QUERIES[cat];
       for (const lang of langs) {
         for (const q of catQueries[lang]) {
-          searches.push({ query: q, lang });
+          searches.push({ query: q, lang, category: cat });
         }
       }
     }
-    // Add relevant scholars for requested languages (once, not per category)
     for (const scholar of KNOWN_SCHOLARS) {
       if (langs.includes(scholar.lang)) {
         searches.push({
           query: `${scholar.query} تذكير قصير OR short reminder`,
           lang: scholar.lang,
+          category: fallbackCategory,
           scholarName: scholar.name,
         });
       }
     }
   }
 
-  const client = new Anthropic({ apiKey: anthropicKey });
+  const client = approveAll ? null : new Anthropic({ apiKey: anthropicKey! });
 
   console.log(`\n✦ LightFeed Curator`);
-  console.log(`  Category : ${category}`);
-  console.log(`  Language : ${langArg}`);
-  console.log(`  Scholar  : ${scholarArg || '(all known scholars)'}`);
-  console.log(`  Dry run  : ${dryRun}\n`);
+  console.log(`  Category   : ${category}`);
+  console.log(`  Language   : ${langArg}`);
+  console.log(`  Scholar    : ${scholarArg || '(all known scholars)'}`);
+  console.log(`  Approval   : ${approveAll ? 'OFF — inserting everything' : 'Claude'}`);
+  console.log(`  Dry run    : ${dryRun}\n`);
 
   // Search YouTube
-  const raw: Array<{ videoId: string; title: string; description: string; channelTitle: string; lang: Lang }> = [];
+  const raw: Array<{ videoId: string; title: string; description: string; channelTitle: string; lang: Lang; category: string }> = [];
   for (const cfg of searches) {
     process.stdout.write(`  🔍 "${cfg.query}" [${cfg.lang}] … `);
-    const results = await searchYouTube(cfg, youtubeKey, 5);
+    const results = await searchYouTube(cfg, youtubeKey, scholarArg ? 10 : 6);
     console.log(`${results.length} results`);
-    raw.push(...results.map(r => ({ ...r, lang: cfg.lang })));
+    raw.push(...results.map(r => ({ ...r, lang: cfg.lang, category: cfg.category })));
   }
 
-  // Deduplicate by videoId
+  // Deduplicate by videoId (keep first occurrence = first category tag)
   const unique = Array.from(new Map(raw.map(r => [r.videoId, r])).values());
   console.log(`\n  ${unique.length} unique candidates`);
 
@@ -367,22 +416,36 @@ async function main() {
     duration: durations[r.videoId] ?? '?:??',
   }));
 
-  // Claude filter
-  process.stdout.write('  🤖 Claude reviewing … ');
-  const approved = await filterWithClaude(withDuration, category, client, Object.keys(CATEGORY_QUERIES));
-  console.log(`${approved.length} approved\n`);
+  // Approval step
+  let toInsert: CuratedVideo[];
 
-  if (approved.length === 0) {
-    console.log('⚠️  Nothing approved. Try different queries or a broader --lang.');
-    return;
+  if (approveAll) {
+    // Skip Claude — map everything directly
+    toInsert = withDuration.slice(0, count).map(r => ({
+      youtubeId:   r.videoId,
+      title:       r.title,
+      source:      r.channelTitle,
+      category:    r.category,
+      description: cleanDescription(r.description),
+      duration:    r.duration,
+      language:    r.lang,
+    }));
+    console.log(`  ⚡ Skipping Claude — ${toInsert.length} videos queued\n`);
+  } else {
+    process.stdout.write('  🤖 Claude reviewing … ');
+    const approved = await filterWithClaude(withDuration, category, client!, Object.keys(CATEGORY_QUERIES), scholarArg || undefined);
+    console.log(`${approved.length} approved\n`);
+    if (approved.length === 0) {
+      console.log('⚠️  Nothing approved. Try different queries, --lang, or --approve-all.');
+      return;
+    }
+    toInsert = approved.slice(0, count);
   }
 
-  const toInsert = approved.slice(0, count);
-
   // Print results
-  console.log('Approved videos:');
+  console.log('Videos to insert:');
   toInsert.forEach((v, i) => {
-    console.log(`  ${i + 1}. [${v.language.toUpperCase()}] ${v.title} — ${v.source} (${v.duration})`);
+    console.log(`  ${i + 1}. [${v.language.toUpperCase()}] [${v.category}] ${v.title} — ${v.source} (${v.duration})`);
   });
 
   if (dryRun) {
