@@ -41,6 +41,17 @@
   scroll-snap-stop: always;
 }
 
+/* Admin form helpers */
+@layer components {
+  .label {
+    @apply block text-xs font-semibold text-stone-500 uppercase tracking-wide mb-1.5;
+  }
+  .input {
+    @apply w-full px-3.5 py-2.5 rounded-xl border border-stone-200 bg-white text-stone-900
+           text-sm focus:outline-none focus:ring-2 focus:ring-forest-200 placeholder-stone-400;
+  }
+}
+
 /* Slide-up modal animation */
 @keyframes slideUp {
   from { transform: translateY(100%); }

@@ -1,5 +1,5 @@
-import React from 'react';
 import { NavLink } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 
 function FeedIcon({ active }: { active: boolean }) {
   return (
@@ -35,28 +35,43 @@ function PenIcon({ active }: { active: boolean }) {
   );
 }
 
-const NAV = [
-  { path: '/feed',        label: 'Feed',        Icon: FeedIcon },
-  { path: '/saved',       label: 'Saved',       Icon: BookmarkIcon },
-  { path: '/reflections', label: 'Reflections', Icon: PenIcon },
-];
+function PersonIcon({ active, hasUser }: { active: boolean; hasUser: boolean }) {
+  return (
+    <div className="relative">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+        stroke={active ? '#1A4731' : '#a8a29e'} strokeWidth="2"
+        strokeLinecap="round" strokeLinejoin="round">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+        <circle cx="12" cy="7" r="4" />
+      </svg>
+      {hasUser && (
+        <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-forest-500 rounded-full border border-warm-50" />
+      )}
+    </div>
+  );
+}
 
 export function BottomNav() {
+  const { user } = useAuth();
+
+  const NAV = [
+    { path: '/feed',        label: 'Feed',        icon: (a: boolean) => <FeedIcon active={a} /> },
+    { path: '/saved',       label: 'Saved',       icon: (a: boolean) => <BookmarkIcon active={a} /> },
+    { path: '/reflections', label: 'Reflections', icon: (a: boolean) => <PenIcon active={a} /> },
+    { path: '/profile',     label: 'Profile',     icon: (a: boolean) => <PersonIcon active={a} hasUser={!!user} /> },
+  ];
+
   return (
     <nav
       className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-stone-100"
       style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
     >
       <div className="flex items-center justify-around h-14">
-        {NAV.map(({ path, label, Icon }) => (
-          <NavLink
-            key={path}
-            to={path}
-            className="flex flex-col items-center gap-0.5 px-8 py-1.5"
-          >
+        {NAV.map(({ path, label, icon }) => (
+          <NavLink key={path} to={path} className="flex flex-col items-center gap-0.5 px-6 py-1.5">
             {({ isActive }) => (
               <>
-                <Icon active={isActive} />
+                {icon(isActive)}
                 <span className={`text-[11px] font-medium ${isActive ? 'text-forest-900' : 'text-stone-400'}`}>
                   {label}
                 </span>

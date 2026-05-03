@@ -20,8 +20,15 @@ create policy "Public read"
   on videos for select
   using (true);
 
--- Only the service role key (used by the curate script) can insert/update.
--- The service role bypasses RLS by default — no extra policy needed.
+-- Allow inserts from the browser (admin upload page uses the anon key).
+-- For production, replace this with a Supabase Auth check.
+create policy "Admin insert"
+  on videos for insert
+  with check (true);
+
+create policy "Admin update"
+  on videos for update
+  using (true);
 
 
 -- ── Migration: run if table already exists ────────────────────────────────────
