@@ -23,14 +23,28 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 const toEmail = (username: string) =>
   `${username.toLowerCase().replace(/[^a-z0-9_]/g, '_')}@lightfeed.app`;
 
-async function fetchProfile(userId: string): Promise<Profile | null> {
+async function fetchProfile(user: User): Promise<Profile | null> {
   if (!supabase) return null;
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('profiles')
     .select('id, username, role')
-    .eq('id', userId)
+    .eq('id', user.id)
     .single();
-  return (data as Profile) ?? null;
+
+  if (data) return data as Profile;
+
+  if (error) console.error('[fetchProfile] select error:', error.code, error.message);
+
+  // No profile row — create one (handles users created before the DB trigger was set up)
+  const username = (user.email ?? '').split('@')[0] || 'user';
+  const { data: created, error: upsertError } = await supabase
+    .from('profiles')
+    .upsert({ id: user.id, username, role: 'client' }, { onConflict: 'id', ignoreDuplicates: true })
+    .select('id, username, role')
+    .single();
+
+  if (upsertError) console.error('[fetchProfile] upsert error:', upsertError.code, upsertError.message);
+  return (created as Profile) ?? null;
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -41,15 +55,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!supabase) { setLoading(false); return; }
 
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      if (session?.user) setProfile(await fetchProfile(session.user.id));
-      setLoading(false);
-    });
+    // autoRefreshToken is disabled so getSession() reads localStorage
+    // synchronously — no network call, no hang on page refresh while logged in.
+    supabase.auth.getSession()
+      .then(({ data: { session } }) => {
+        setUser(session?.user ?? null);
+        setLoading(false);
+        if (session?.user) fetchProfile(session.user).then(setProfile);
+      })
+      .catch(() => setLoading(false));
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    // onAuthStateChange handles sign-in, sign-out, and token refresh events.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
-      setProfile(session?.user ? await fetchProfile(session.user.id) : null);
+      if (session?.user) fetchProfile(session.user).then(setProfile);
+      else setProfile(null);
     });
 
     return () => subscription.unsubscribe();
@@ -57,11 +77,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signIn = useCallback(async (username: string, pin: string): Promise<string | null> => {
     if (!supabase) return 'Supabase not configured.';
-    const { error } = await supabase.auth.signInWithPassword({
-      email: toEmail(username),
-      password: pin,
-    });
-    return error ? 'Incorrect username or PIN.' : null;
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: toEmail(username),
+        password: pin,
+      });
+      return error ? 'Incorrect username or PIN.' : null;
+    } catch {
+      return 'Connection timed out — check your network and try again.';
+    }
   }, []);
 
   const signUp = useCallback(async (username: string, pin: string): Promise<string | null> => {

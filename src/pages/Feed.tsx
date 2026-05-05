@@ -30,6 +30,7 @@ export function Feed() {
   useEffect(() => {
     videoService.getAll()
       .then(v => { setVideos(v); setActiveIdx(0); })
+      .catch(e => console.error('[Feed]', e))
       .finally(() => setLoading(false));
   }, []);
 

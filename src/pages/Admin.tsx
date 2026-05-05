@@ -62,7 +62,11 @@ export function Admin() {
     setForm(f => ({ ...f, [key]: value }));
 
   // Auth guard
-  if (loading) return null;
+  if (loading || (user && !profile)) return (
+    <div className="min-h-screen bg-warm-50 flex items-center justify-center">
+      <div className="w-6 h-6 border-2 border-stone-200 border-t-forest-700 rounded-full animate-spin" />
+    </div>
+  );
   if (!user) {
     return (
       <div className="min-h-screen bg-warm-50 flex flex-col items-center justify-center gap-4 px-8 text-center">

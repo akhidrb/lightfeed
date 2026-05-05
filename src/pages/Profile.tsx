@@ -5,10 +5,18 @@ import { BottomNav } from '../components/BottomNav';
 
 export function Profile() {
   const navigate = useNavigate();
-  const { user, profile, isAdmin, signOut } = useAuth();
+  const { user, profile, isAdmin, loading, signOut } = useAuth();
   const { reflections, savedIds } = useApp();
 
-  if (!user || !profile) {
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-warm-50 flex items-center justify-center">
+        <div className="w-6 h-6 border-2 border-stone-200 border-t-forest-700 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
     return (
       <div
         className="min-h-screen bg-warm-50 flex flex-col items-center justify-center gap-4 px-8 text-center"
@@ -32,6 +40,15 @@ export function Profile() {
       </div>
     );
   }
+
+  if (!profile) {
+    return (
+      <div className="min-h-screen bg-warm-50 flex items-center justify-center">
+        <div className="w-6 h-6 border-2 border-stone-200 border-t-forest-700 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
 
   return (
     <div

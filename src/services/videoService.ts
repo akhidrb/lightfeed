@@ -30,8 +30,16 @@ async function query(filter?: { column: string; value: string }): Promise<Video[
   if (!supabase) return [];
   let q = supabase.from('videos').select('*').order('created_at', { ascending: false });
   if (filter) q = q.eq(filter.column, filter.value);
-  const { data, error } = await q;
-  if (error) throw error;
+
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('Request timed out')), 45_000)
+  );
+
+  const { data, error } = await Promise.race([q, timeout]) as Awaited<typeof q>;
+  if (error) {
+    console.error('[videoService]', error.message);
+    return [];
+  }
   return (data as Row[]).map(toVideo);
 }
 
