@@ -66,9 +66,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .catch(() => setLoading(false));
 
     // onAuthStateChange handles sign-in, sign-out, and token refresh events.
+    // IMPORTANT: do NOT return the fetchProfile promise from this callback.
+    // Supabase awaits every onAuthStateChange callback while holding the Web
+    // Lock. A returned promise keeps the lock open until the profile DB fetch
+    // finishes, blocking every other Supabase call (including the feed query).
+    // void discards the promise so the lock is released immediately.
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
-      if (session?.user) fetchProfile(session.user).then(setProfile);
+      if (session?.user) void fetchProfile(session.user).then(setProfile);
       else setProfile(null);
     });
 
